@@ -94,7 +94,7 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
       return;
     }
 
-    final selected = <String>{
+    final selected = <String, bool>{
       '概括归纳': false,
       '综合分析': false,
       '提出对策': false,

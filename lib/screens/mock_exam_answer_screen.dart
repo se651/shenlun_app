@@ -91,9 +91,9 @@ $material
             {'role': 'user', 'content': prompt},
           ],
           'temperature': 0.3,
-          'max_tokens': 2000,
+          'max_tokens': 3000,
         }),
-      ).timeout(const Duration(seconds: 45));
+      ).timeout(const Duration(seconds: 90));
 
       if (!mounted) return;
 
@@ -329,8 +329,11 @@ $material
     final score = result['score'];
     final feedback = result['feedback'] as String? ?? '';
     final details = result['details'] as String? ?? '';
+    final breakdown = result['breakdown'] as Map<String, dynamic>?;
+    final weaknesses = result['weaknesses'] as List?;
     final analyses = result['analyses'] as Map<String, dynamic>?;
     final suggestion = result['suggestion'] as String? ?? '';
+    final modelAnswers = result['modelAnswers'] as Map<String, dynamic>?;
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       // Score card
@@ -347,49 +350,123 @@ $material
           Text(feedback, style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.5), textAlign: TextAlign.center),
         ]),
       ),
-
       const SizedBox(height: 20),
 
-      // Detailed analysis
-      if (details.isNotEmpty) ...[
-        _section('📊 详细分析', details),
-        const SizedBox(height: 16),
-      ],
-
-      // Four-teacher analysis
-      if (analyses != null && analyses.isNotEmpty) ...[
-        const Text('🎓 名师评析', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      // Dimension breakdown
+      if (breakdown != null && breakdown.isNotEmpty) ...[
+        const Text('📊 维度得分', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
         const SizedBox(height: 8),
-        ...analyses.entries.where((e) => (e.value as String).isNotEmpty).map((e) => Container(
-          width: double.infinity,
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: _teacherColor(e.key).withOpacity(0.08),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: _teacherColor(e.key).withOpacity(0.2)),
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: _teacherColor(e.key),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(e.key, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
+        ...breakdown.entries.map((e) => Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Row(children: [
+            SizedBox(width: 40, child: Text(e.key, style: TextStyle(fontSize: 12, color: Colors.grey.shade600))),
+            Expanded(child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: (e.value is num ? (e.value as num).toDouble() : 0) / 100,
+                minHeight: 8, backgroundColor: Colors.grey.shade200,
+                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4ECDC4)),
               ),
-            ]),
-            const SizedBox(height: 6),
-            SelectableText(e.value as String, style: const TextStyle(fontSize: 13, height: 1.7)),
+            )),
+            const SizedBox(width: 8),
+            Text('${e.value}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
           ]),
         )),
         const SizedBox(height: 16),
       ],
 
-      // Suggestion
+      if (details.isNotEmpty) ...[
+        _section('📊 详细分析', details),
+        const SizedBox(height: 16),
+      ],
+
+      if (weaknesses != null && weaknesses.isNotEmpty) ...[
+        const Row(children: [
+          Icon(Icons.warning_amber, size: 16, color: Color(0xFFE94560)),
+          SizedBox(width: 6),
+          Text('不足之处', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Color(0xFFE94560))),
+        ]),
+        const SizedBox(height: 8),
+        ...weaknesses.map((w) => Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('• ', style: TextStyle(fontSize: 13)),
+            Expanded(child: Text('$w', style: const TextStyle(fontSize: 13, height: 1.5))),
+          ]),
+        )),
+        const SizedBox(height: 16),
+      ],
+
+      // Teacher analyses
+      if (analyses != null && analyses.isNotEmpty) ...[
+        const Text('🎓 名师评析', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        ...['袁东', '白鹭', '飞扬', '小马哥', '忠政'].where((t) => (analyses[t] ?? '').toString().isNotEmpty).map((teacher) => Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: _teacherColor(teacher).withOpacity(0.08),
+            borderRadius: BorderRadius.circular(10),
+            border: Border(left: BorderSide(color: _teacherColor(teacher), width: 3)),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: _teacherColor(teacher), borderRadius: BorderRadius.circular(4)),
+                child: Text(teacher, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            SelectableText(analyses[teacher] as String, style: const TextStyle(fontSize: 13, height: 1.7)),
+          ]),
+        )),
+        const SizedBox(height: 16),
+      ],
+
+      // Model answers from 5 teachers
+      if (modelAnswers != null && modelAnswers.isNotEmpty) ...[
+        const Text('📝 名师参考答案', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        ...['袁东', '白鹭', '飞扬', '小马哥', '忠政'].where((t) => (modelAnswers[t] ?? '').toString().isNotEmpty).map((teacher) => Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: _teacherColor(teacher).withOpacity(0.04),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: _teacherColor(teacher).withOpacity(0.15)),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: _teacherColor(teacher), borderRadius: BorderRadius.circular(4)),
+                child: Text(teacher, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
+              ),
+              const SizedBox(width: 8),
+              Text(_teacherStyle(teacher), style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 14, color: Colors.grey),
+                tooltip: '复制',
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: modelAnswers[teacher] ?? ''));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已复制$teacher参考答案'), duration: const Duration(seconds: 1)));
+                },
+                padding: EdgeInsets.zero, constraints: const BoxConstraints(),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            SelectableText(modelAnswers[teacher] as String, style: const TextStyle(fontSize: 13, height: 1.7)),
+          ]),
+        )),
+        const SizedBox(height: 16),
+      ],
+
       if (suggestion.isNotEmpty) ...[
-        _section('💡 改进建议', suggestion),
+        _section('💡 综合建议', suggestion),
       ],
 
       const SizedBox(height: 8),
@@ -425,9 +502,20 @@ $material
       default: return const Color(0xFF6C5CE7);
     }
   }
+
+  String _teacherStyle(String name) {
+    switch (name) {
+      case '袁东': return '化大为小·规范表达';
+      case '白鹭': return '紧贴材料·原文提取';
+      case '飞扬': return '五大原则·系统框架';
+      case '小马哥': return '材料是爹·找大哥';
+      case '忠政': return '三步走·综合全面';
+      default: return '';
+    }
+  }
 }
 
-const _gradingSystemPrompt = '''你是五位国家公务员考试申论名师组成的评审团。请按照以下分工批改考生的申论模拟题答案：
+const _gradingSystemPrompt = '''你是五位国家公务员考试申论名师组成的评审团。请按照以下分工批改考生的申论模拟题答案，并各自给出参考答案：
 
 【袁东老师主评 — 化大为小·规范表达】
 采用赋分制（从0分起，逐项加分，不扣分）：
@@ -439,16 +527,26 @@ const _gradingSystemPrompt = '''你是五位国家公务员考试申论名师组
 
 【名师评析 — 五位老师各写一段】
 - 袁东：从宏观立意和规范表达角度点评
-- 白鹭（紧贴材料·原文提取）：检查是否紧扣材料，指出遗漏要点
+- 白鹭（紧贴材料·原文提取）：检查是否紧扣材料，指出遗漏的材料要点
 - 飞扬（五大原则·系统框架）：从逻辑框架和结构层次角度点评
 - 小马哥（材料是爹·找大哥）：从实战得分角度，指出最关键提分点
-- 忠政（忠政方法论·三步走）：审题干→读材料→整答案，从五维评分体系点评（材料扣合度、逻辑结构、政策素养、语言规范、完整性），标注材料来源段落位置，给出参考答案框架
+- 忠政（忠政方法论·三步走）：审题干→读材料→整答案，从五维评分体系点评，标注材料来源段落位置
+
+【名师参考答案 — 五位老师各写一份完整参考范文】
+- 袁东风：规范严谨，总分结构，善用政策术语
+- 白鹭风：紧贴材料原文，要点式作答，标注材料来源
+- 飞扬风：逻辑框架清晰，用小标题分层
+- 小马哥风：实战导向，简洁有力直接得分
+- 忠政风：严格遵循三步走方法论
 
 请用以下 JSON 格式回复（不要输出其他内容）：
 {
   "score": 数字,
   "feedback": "一句话总体评价",
-  "details": "从内容、结构、语言、规范四维度逐条分析",
+  "details": "逐条具体分析",
+  "breakdown": {"内容": 数字, "结构": 数字, "语言": 数字, "规范": 数字},
+  "weaknesses": ["不足1", "不足2"],
   "analyses": {"袁东": "...", "白鹭": "...", "飞扬": "...", "小马哥": "...", "忠政": "..."},
-  "suggestion": "综合改进建议..."
+  "suggestion": "综合改进建议...",
+  "modelAnswers": {"袁东": "完整范文...", "白鹭": "完整范文...", "飞扬": "完整范文...", "小马哥": "完整范文...", "忠政": "完整范文..."}
 }''';
