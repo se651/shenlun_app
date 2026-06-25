@@ -1,0 +1,12 @@
+# Flutter Web MIME 映射 — 复制到 COS 桶的后缀类型设置
+# COS 控制台 → 基础配置 → 静态网站 → 高级配置 → 添加
+
+.htm  text/html
+.html text/html
+.js   application/javascript
+.json application/json
+.png  image/png
+.jpg  image/jpeg
+.wasm application/wasm
+.ttf  font/ttf
+.otf  font/otf
