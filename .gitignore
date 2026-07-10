@@ -47,5 +47,23 @@ app.*.map.json
 # Gradle
 .gradle/
 
+# Backup files
+*.bak
+*.bak_*
+*.bak.*
+
+# Temporary scripts and debug files
+debug_*.html
+old_scraper.dart
+test_short.py
+worker.js
+wrangler.toml
+cctv_output.json
+empty_questions.json
+
+# Python cache and venv
+__pycache__/
+*.pyc
+
 # Claude internal
 .claude/
