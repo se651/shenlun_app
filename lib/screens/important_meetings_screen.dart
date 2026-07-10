@@ -26,6 +26,12 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
   bool _aiLoading = false;
   bool _generating = false;
 
+  // AI 自动获取
+  List<ImportantMeeting> _aiMeetings = [];
+  bool _aiMeetingsLoading = false;
+  List<NewConcept> _aiConcepts = [];
+  bool _aiConceptsLoading = false;
+
   // 新兴概念 AI 分析
   String? _conceptAiAnalysis;
   bool _conceptAiLoading = false;
@@ -75,9 +81,13 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
   }
 
   Future<void> _tryAiAnalyze(List<String> titles) async {
-    final apiKey = await DatabaseHelper().getSetting('deepseek_api_key');
-    if (apiKey.isEmpty || titles.length < 3) return;
+    if (_aiLoading) return; // 防止重复调用
     setState(() => _aiLoading = true);
+    final apiKey = await DatabaseHelper().getSetting('deepseek_api_key');
+    if (apiKey.isEmpty || titles.length < 3) {
+      if (mounted) setState(() => _aiLoading = false);
+      return;
+    }
     final result = await MeetingRefreshService.aiAnalyze(apiKey, titles);
     if (mounted) setState(() { _aiAnalysis = result; _aiLoading = false; });
   }
@@ -211,11 +221,273 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
     }
   }
 
-  /// AI 深度剖析单个概念的申论考点
-  Future<void> _analyzeConcept(int index) async {
+  /// 从 AI 响应中提取 JSON 数组（兼容 markdown 代码块）
+  static List<dynamic>? _extractJsonArray(String text) {
+    // 直接解析
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is List) return decoded;
+    } catch (_) {}
+    // 从 markdown 代码块提取
+    final codeBlock = RegExp(r'```(?:json)?\s*\n?([\s\S]*?)\n?```').firstMatch(text);
+    if (codeBlock != null) {
+      try {
+        final decoded = jsonDecode(codeBlock.group(1)!);
+        if (decoded is List) return decoded;
+      } catch (_) {}
+    }
+    // 从文本中提取 JSON 数组
+    final arrayMatch = RegExp(r'\[[\s\S]*\]').firstMatch(text);
+    if (arrayMatch != null) {
+      try {
+        final decoded = jsonDecode(arrayMatch.group(0)!);
+        if (decoded is List) return decoded;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// AI 自动获取最新会议（Tab1）
+  Future<void> _aiFetchMeetings() async {
+    if (_aiMeetingsLoading) return; // 防止重复点击
+    setState(() => _aiMeetingsLoading = true);
     final apiKey = await DatabaseHelper().getSetting('deepseek_api_key');
     if (apiKey.isEmpty) {
       if (mounted) {
+        setState(() => _aiMeetingsLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先在「我的」页面设置 DeepSeek API Key')),
+        );
+      }
+      return;
+    }
+
+    final existingTitles = importantMeetingsData.map((m) => m.title).join('、');
+    try {
+      final prompt = '''你是申论备考专家，非常了解中国政治和政府工作。请列出2025-2026年最新发布的重要会议（3-5个），必须区别于以下已有会议：$existingTitles
+
+以JSON数组格式返回，每个会议含：
+- title: 会议全称
+- date: 时间（如"2026年6月"）
+- summary: 核心内容概述（100字内）
+- keyPoints: 申论要点（用序号1. 2. 3.列出，3-5条）
+- category: economy/agriculture/ecology/party/tech/livelihood 之一
+
+只返回JSON数组，不要其他内容。''';
+
+      final response = await http.post(
+        Uri.parse('https://api.deepseek.com/v1/chat/completions'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: jsonEncode({
+          'model': 'deepseek-chat',
+          'messages': [
+            {'role': 'system', 'content': '你是申论备考专家，熟悉中国政治会议。只返回JSON，不返回其他内容。'},
+            {'role': 'user', 'content': prompt},
+          ],
+          'temperature': 0.3,
+          'max_tokens': 1500,
+        }),
+      ).timeout(const Duration(seconds: 60));
+
+      if (response.statusCode != 200 || !mounted) {
+        if (mounted) {
+          setState(() => _aiMeetingsLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(response.statusCode == 401 ? 'API Key 无效' : 'AI 获取失败 (${response.statusCode})')),
+          );
+        }
+        return;
+      }
+
+      final data = jsonDecode(response.body);
+      final content = data['choices']?[0]?['message']?['content'] as String?;
+      if (content == null || content.isEmpty) {
+        if (mounted) setState(() => _aiMeetingsLoading = false);
+        return;
+      }
+
+      final jsonList = _extractJsonArray(content);
+      if (jsonList == null || !mounted) {
+        if (mounted) {
+          setState(() => _aiMeetingsLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('AI 返回格式异常，请重试')),
+          );
+        }
+        return;
+      }
+
+      final meetings = <ImportantMeeting>[];
+      for (final item in jsonList) {
+        if (item is! Map<String, dynamic>) continue;
+        meetings.add(ImportantMeeting(
+          title: item['title']?.toString() ?? '',
+          date: item['date']?.toString() ?? '',
+          summary: item['summary']?.toString() ?? '',
+          keyPoints: item['keyPoints']?.toString() ?? '',
+          category: item['category']?.toString() ?? 'economy',
+        ));
+      }
+
+      if (mounted) {
+        setState(() {
+          _aiMeetings = meetings;
+          _aiMeetingsLoading = false;
+        });
+        if (meetings.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('✅ AI 已获取 ${meetings.length} 个最新会议')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('⚠️ AI 未找到新的会议数据，请重试')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _aiMeetingsLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e is http.ClientException ? '网络连接失败' : '获取超时，请重试')),
+        );
+      }
+    }
+  }
+
+  /// AI 自动获取新兴概念（Tab3）
+  Future<void> _aiFetchConcepts() async {
+    if (_aiConceptsLoading) return; // 防止重复点击
+    setState(() => _aiConceptsLoading = true);
+    final apiKey = await DatabaseHelper().getSetting('deepseek_api_key');
+    if (apiKey.isEmpty) {
+      if (mounted) {
+        setState(() => _aiConceptsLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先在「我的」页面设置 DeepSeek API Key')),
+        );
+      }
+      return;
+    }
+
+    final existingNames = newConcepts.map((c) => c.name).join('、');
+    try {
+      final prompt = '''你是申论备考专家，非常了解中国社会治理创新和新兴政策概念。请提供2025-2026年新出现或热门的治理概念/社会政策新概念（3-5个），必须区别于以下已有概念：$existingNames
+
+以JSON数组格式返回，每个概念含：
+- name: 概念名称
+- subtitle: 一句话副标题描述
+- source: 出处/来源（50字内）
+- meaning: 释义（150字内）
+- socialPhenomenon: 社会现象分析（150字内）
+- policyLink: 政策链接（50字内）
+- examAngle: 申论考点分析（100字内）
+- keywords: 关键词数组，3-5个
+
+只返回JSON数组，不要其他内容。''';
+
+      final response = await http.post(
+        Uri.parse('https://api.deepseek.com/v1/chat/completions'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $apiKey',
+        },
+        body: jsonEncode({
+          'model': 'deepseek-chat',
+          'messages': [
+            {'role': 'system', 'content': '你是申论备考专家，熟悉中国社会治理创新概念。只返回JSON，不返回其他内容。'},
+            {'role': 'user', 'content': prompt},
+          ],
+          'temperature': 0.3,
+          'max_tokens': 2000,
+        }),
+      ).timeout(const Duration(seconds: 60));
+
+      if (response.statusCode != 200 || !mounted) {
+        if (mounted) {
+          setState(() => _aiConceptsLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(response.statusCode == 401 ? 'API Key 无效' : 'AI 获取失败 (${response.statusCode})')),
+          );
+        }
+        return;
+      }
+
+      final data = jsonDecode(response.body);
+      final content = data['choices']?[0]?['message']?['content'] as String?;
+      if (content == null || content.isEmpty) {
+        if (mounted) setState(() => _aiConceptsLoading = false);
+        return;
+      }
+
+      final jsonList = _extractJsonArray(content);
+      if (jsonList == null || !mounted) {
+        if (mounted) {
+          setState(() => _aiConceptsLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('AI 返回格式异常，请重试')),
+          );
+        }
+        return;
+      }
+
+      final concepts = <NewConcept>[];
+      for (final item in jsonList) {
+        if (item is! Map<String, dynamic>) continue;
+        final keywords = <String>[];
+        final kwList = item['keywords'];
+        if (kwList is List) {
+          for (final kw in kwList) {
+            keywords.add(kw.toString());
+          }
+        }
+        concepts.add(NewConcept(
+          name: item['name']?.toString() ?? '',
+          subtitle: item['subtitle']?.toString() ?? '',
+          source: item['source']?.toString() ?? '',
+          meaning: item['meaning']?.toString() ?? '',
+          socialPhenomenon: item['socialPhenomenon']?.toString() ?? '',
+          policyLink: item['policyLink']?.toString() ?? '',
+          examAngle: item['examAngle']?.toString() ?? '',
+          keywords: keywords,
+        ));
+      }
+
+      if (mounted) {
+        setState(() {
+          _aiConcepts = concepts;
+          _aiConceptsLoading = false;
+        });
+        if (concepts.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('✅ AI 已获取 ${concepts.length} 个最新概念')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('⚠️ AI 未找到新的概念数据，请重试')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _aiConceptsLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e is http.ClientException ? '网络连接失败' : '获取超时，请重试')),
+        );
+      }
+    }
+  }
+
+  /// AI 深度剖析单个概念的申论考点
+  Future<void> _analyzeConcept(int index) async {
+    if (_analyzingIndex != null) return; // 防止重复点击
+    setState(() { _analyzingIndex = index; _conceptAiLoading = true; });
+    final apiKey = await DatabaseHelper().getSetting('deepseek_api_key');
+    if (apiKey.isEmpty) {
+      if (mounted) {
+        setState(() { _analyzingIndex = null; _conceptAiLoading = false; });
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('请先在「我的」页面设置 DeepSeek API Key')),
         );
@@ -224,7 +496,6 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
     }
 
     final concept = newConcepts[index];
-    setState(() { _analyzingIndex = index; _conceptAiLoading = true; });
 
     try {
       final prompt = '''你是申论辅导专家。请对以下新兴治理概念进行深度剖析，重点分析其申论考点：
@@ -358,27 +629,99 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        // AI 自动获取按钮
+        Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFF6C5CE7), Color(0xFFA29BFE)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(children: [
+            const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text('AI 自动获取最新会议', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
+            ),
+            _aiMeetingsLoading
+                ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : ElevatedButton.icon(
+                    icon: const Icon(Icons.search, size: 16),
+                    label: const Text('搜索', style: TextStyle(fontSize: 12)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: const Color(0xFF6C5CE7),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    onPressed: _aiFetchMeetings,
+                  ),
+          ]),
+        ),
+        // AI 生成的会议
+        if (_aiMeetings.isNotEmpty) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+            margin: const EdgeInsets.only(bottom: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF6C5CE7).withOpacity(0.08),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: const Row(children: [
+              Icon(Icons.auto_awesome, size: 14, color: Color(0xFF6C5CE7)),
+              SizedBox(width: 6),
+              Text('AI 智能生成', style: TextStyle(fontSize: 11, color: Color(0xFF6C5CE7), fontWeight: FontWeight.w600)),
+            ]),
+          ),
+          for (final meeting in _aiMeetings)
+            _buildMeetingCard(meeting, isAi: true),
+          const Divider(height: 24),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+            margin: const EdgeInsets.only(bottom: 8),
+            child: const Text('📋 内置会议数据', style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
+          ),
+        ],
         for (final meeting in importantMeetingsData)
           _buildMeetingCard(meeting),
       ],
     );
   }
 
-  Widget _buildMeetingCard(ImportantMeeting meeting) {
+  Widget _buildMeetingCard(ImportantMeeting meeting, {bool isAi = false}) {
     final categoryLabel = meetingCategoryLabels[meeting.category] ?? meeting.category;
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: isAi ? const BorderSide(color: Color(0xFF6C5CE7), width: 1.5) : BorderSide.none,
+      ),
       child: ExpansionTile(
         leading: Container(
           width: 40, height: 40,
           decoration: BoxDecoration(
-            color: const Color(0xFF1A1A2E).withOpacity(0.1),
+            color: isAi ? const Color(0xFF6C5CE7).withOpacity(0.1) : const Color(0xFF1A1A2E).withOpacity(0.1),
             borderRadius: BorderRadius.circular(8),
           ),
-          child: const Icon(Icons.event, color: Color(0xFF1A1A2E), size: 20),
+          child: Icon(isAi ? Icons.auto_awesome : Icons.event, color: isAi ? const Color(0xFF6C5CE7) : const Color(0xFF1A1A2E), size: 20),
         ),
-        title: Text(meeting.title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        title: Row(children: [
+          if (isAi)
+            Container(
+              margin: const EdgeInsets.only(right: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF6C5CE7).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('AI', style: TextStyle(fontSize: 9, color: Color(0xFF6C5CE7), fontWeight: FontWeight.w700)),
+            ),
+          Expanded(child: Text(meeting.title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
+        ]),
         subtitle: Row(children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -429,6 +772,43 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // AI 智能获取重点按钮
+          Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFFE94560), Color(0xFFFF6B6B)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(children: [
+              const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('AI 智能获取重点', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
+                  SizedBox(height: 2),
+                  Text('自动搜索最新会议动态并分析申论考点', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                ]),
+              ),
+              (_aiLoading || _loadingArticles)
+                  ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : ElevatedButton.icon(
+                      icon: const Icon(Icons.search, size: 16),
+                      label: const Text('获取', style: TextStyle(fontSize: 12)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: const Color(0xFFE94560),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onPressed: _refresh,
+                    ),
+            ]),
+          ),
           if (_aiAnalysis.isNotEmpty) ...[
             Container(
               padding: const EdgeInsets.all(16),
@@ -551,8 +931,75 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
       Expanded(
         child: ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount: newConcepts.length,
-          itemBuilder: (ctx, i) => _buildConceptCard(i),
+          itemCount: 1 + newConcepts.length,
+          itemBuilder: (ctx, i) {
+            // 第一项：AI 获取按钮 + AI 生成的概念
+            if (i == 0) {
+              return Column(children: [
+                Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF4ECDC4), Color(0xFF44B09E)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('AI 搜索最新概念', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
+                        SizedBox(height: 2),
+                        Text('自动搜索新兴治理概念并填充', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                      ]),
+                    ),
+                    _aiConceptsLoading
+                        ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : ElevatedButton.icon(
+                            icon: const Icon(Icons.search, size: 16),
+                            label: const Text('搜索', style: TextStyle(fontSize: 12)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: const Color(0xFF4ECDC4),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            onPressed: _aiFetchConcepts,
+                          ),
+                  ]),
+                ),
+                // AI 生成的概念
+                if (_aiConcepts.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    margin: const EdgeInsets.only(bottom: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF4ECDC4).withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Row(children: [
+                      Icon(Icons.auto_awesome, size: 14, color: Color(0xFF4ECDC4)),
+                      SizedBox(width: 6),
+                      Text('AI 智能生成', style: TextStyle(fontSize: 11, color: Color(0xFF4ECDC4), fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
+                  ..._aiConcepts.asMap().entries.map((e) => _buildConceptCardFromData(e.value, index: e.key, isAi: true)),
+                  const Divider(height: 24),
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    margin: const EdgeInsets.only(bottom: 8),
+                    child: const Text('📋 内置概念数据', style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ]);
+            }
+            // 内置概念
+            return _buildConceptCard(i - 1);
+          },
         ),
       ),
     ]);
@@ -643,6 +1090,111 @@ class _ImportantMeetingsScreenState extends State<ImportantMeetingsScreen>
                   ),
                 ),
                 const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.quiz, size: 14),
+                    label: const Text('生成模拟题', style: TextStyle(fontSize: 11)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF4ECDC4),
+                      side: const BorderSide(color: Color(0xFF4ECDC4)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    onPressed: () => _showMockExamDialog(c.name, _conceptContentForGen(c)),
+                  ),
+                ),
+              ]),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 基于 NewConcept 数据构建卡片（支持 AI 生成的概念）
+  Widget _buildConceptCardFromData(NewConcept c, {required int index, bool isAi = false}) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: isAi ? const BorderSide(color: Color(0xFF4ECDC4), width: 1.5) : BorderSide.none,
+      ),
+      child: ExpansionTile(
+        leading: Container(
+          width: 40, height: 40,
+          decoration: BoxDecoration(
+            color: isAi ? const Color(0xFF4ECDC4).withOpacity(0.1) : const Color(0xFFE94560).withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: isAi
+                ? const Icon(Icons.auto_awesome, size: 16, color: Color(0xFF4ECDC4))
+                : Text('${index + 1}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFFE94560))),
+          ),
+        ),
+        title: Row(children: [
+          if (isAi)
+            Container(
+              margin: const EdgeInsets.only(right: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF4ECDC4).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text('AI', style: TextStyle(fontSize: 9, color: Color(0xFF4ECDC4), fontWeight: FontWeight.w700)),
+            ),
+          Expanded(child: Text(c.name, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700))),
+        ]),
+        subtitle: Text(c.subtitle, style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Divider(),
+              _sectionLabel('📖 出处'),
+              const SizedBox(height: 4),
+              Text(c.source, style: TextStyle(fontSize: 12, color: Colors.grey.shade700, height: 1.5)),
+              const SizedBox(height: 12),
+              _sectionLabel('📝 释义'),
+              const SizedBox(height: 4),
+              Text(c.meaning, style: const TextStyle(fontSize: 13, height: 1.7)),
+              const SizedBox(height: 12),
+              _sectionLabel('🔍 现象与事例'),
+              const SizedBox(height: 4),
+              Text(c.socialPhenomenon, style: const TextStyle(fontSize: 13, height: 1.7)),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A2E).withOpacity(0.04),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF1A1A2E).withOpacity(0.08)),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _sectionLabel('🏛️ 政策深度'),
+                  const SizedBox(height: 4),
+                  Text(c.policyLink, style: const TextStyle(fontSize: 13, height: 1.7)),
+                ]),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 6, runSpacing: 4,
+                children: c.keywords.map((kw) => Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE94560).withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(kw, style: const TextStyle(fontSize: 10, color: Color(0xFFE94560))),
+                )).toList(),
+              ),
+              const SizedBox(height: 12),
+              _sectionLabel('📋 申论考点'),
+              const SizedBox(height: 4),
+              Text(c.examAngle, style: const TextStyle(fontSize: 13, height: 1.7)),
+              const SizedBox(height: 14),
+              // 操作按钮
+              Row(children: [
                 Expanded(
                   child: OutlinedButton.icon(
                     icon: const Icon(Icons.quiz, size: 14),
