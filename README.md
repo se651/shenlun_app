@@ -78,7 +78,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/shenlun_app.git
+git clone https://github.com/se651/shenlun_app.git
 cd shenlun_app
 
 # 安装依赖
